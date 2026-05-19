@@ -33,6 +33,9 @@ Open [http://localhost:3001](http://localhost:3001) to access the dashboard.
 Step-by-step connection guides for managed Redis/Valkey providers:
 
 - [Upstash](providers/upstash) — Serverless Redis/Valkey, direct connection with TLS
+- [Redis Cloud](providers/redis-cloud) — Managed Redis, direct connection via public endpoint
+- [AWS ElastiCache](providers/aws-elasticache) — VPC-only, requires BetterDB Agent on EC2
+- [AWS MemoryDB](providers/aws-memorydb) — VPC-only, requires BetterDB Agent on EC2
 
 ## API Reference
 
