@@ -28,7 +28,10 @@ import { VectorAi } from '../../pages/VectorAi';
 import { InferenceLatency } from '../../pages/InferenceLatency';
 import { MetricForecasting } from '../../pages/MetricForecasting';
 import { CacheProposals } from '../../pages/CacheProposals';
+import { Monitor } from '../../pages/Monitor';
+import { MonitorSession } from '../../pages/MonitorSession';
 import { Members } from '../../pages/Members';
+
 import { CloudUser } from '../../api/workspace';
 import { AppSidebar } from './AppSidebar.tsx';
 import { FeedbackModal } from './FeedbackModal';
@@ -212,6 +215,22 @@ export function AppLayout({ cloudUser }: { cloudUser: CloudUser | null }) {
                 element={
                   <NoConnectionsGuard>
                     <CacheProposals />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/monitor"
+                element={
+                  <NoConnectionsGuard>
+                    <Monitor />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/monitor/sessions/:id"
+                element={
+                  <NoConnectionsGuard>
+                    <MonitorSession />
                   </NoConnectionsGuard>
                 }
               />

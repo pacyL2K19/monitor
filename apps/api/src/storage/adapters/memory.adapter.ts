@@ -35,6 +35,16 @@ import {
   DatabaseConnectionConfig,
   StoredCommandStatsSample,
   CommandStatsHistoryQueryOptions,
+  StoredCaptureSession,
+  CaptureSessionQueryOptions,
+  StoredCaptureChunk,
+  CaptureSessionPatch,
+  StoredCaptureTrigger,
+  CaptureTriggerQueryOptions,
+  CaptureTriggerPatch,
+  StoredScheduledCapture,
+  ScheduledCaptureQueryOptions,
+  ScheduledCapturePatch,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -1343,6 +1353,10 @@ export class MemoryAdapter implements StoragePort {
 
   private cacheProposals: Map<string, StoredCacheProposal> = new Map();
   private cacheProposalAudit: Map<string, StoredCacheProposalAudit> = new Map();
+  private captureSessions: Map<string, StoredCaptureSession> = new Map();
+  private captureChunks: StoredCaptureChunk[] = [];
+  private captureTriggers: Map<string, StoredCaptureTrigger> = new Map();
+  private scheduledCaptures: Map<string, StoredScheduledCapture> = new Map();
 
 
   private cloneProposal(p: StoredCacheProposal): StoredCacheProposal {
@@ -1497,5 +1511,189 @@ export class MemoryAdapter implements StoragePort {
       .filter((a) => a.proposal_id === proposalId)
       .sort((a, b) => a.event_at - b.event_at)
       .map((a) => this.cloneAudit(a));
+  }
+
+  async saveCaptureSession(
+    session: StoredCaptureSession,
+    connectionId: string,
+  ): Promise<string> {
+    this.captureSessions.set(session.id, { ...session, connectionId });
+    return session.id;
+  }
+
+  async getCaptureSession(id: string): Promise<StoredCaptureSession | null> {
+    const session = this.captureSessions.get(id);
+    return session ? { ...session } : null;
+  }
+
+  async updateCaptureSession(id: string, patch: CaptureSessionPatch): Promise<boolean> {
+    const session = this.captureSessions.get(id);
+    if (!session) return false;
+    if (patch.status !== undefined) session.status = patch.status;
+    if (patch.endedAt !== undefined) session.endedAt = patch.endedAt;
+    if (patch.durationMs !== undefined) session.durationMs = patch.durationMs;
+    if (patch.byteCount !== undefined) session.byteCount = patch.byteCount;
+    if (patch.lineCount !== undefined) session.lineCount = patch.lineCount;
+    if (patch.terminationReason !== undefined) session.terminationReason = patch.terminationReason;
+    if (patch.nodeSegments !== undefined) session.nodeSegments = patch.nodeSegments;
+    return true;
+  }
+
+  async saveCaptureChunk(chunk: StoredCaptureChunk): Promise<number> {
+    this.captureChunks.push({ ...chunk, bytes: Buffer.from(chunk.bytes) });
+    return 1;
+  }
+
+  async getCaptureChunks(sessionId: string): Promise<StoredCaptureChunk[]> {
+    return this.captureChunks
+      .filter((c) => c.sessionId === sessionId)
+      .sort((a, b) => a.chunkIndex - b.chunkIndex)
+      .map((c) => ({ ...c, bytes: Buffer.from(c.bytes) }));
+  }
+
+  async getCaptureSessions(
+    options: CaptureSessionQueryOptions = {},
+  ): Promise<StoredCaptureSession[]> {
+    let sessions = [...this.captureSessions.values()];
+
+    if (options.connectionId) {
+      sessions = sessions.filter((s) => s.connectionId === options.connectionId);
+    }
+    if (options.status) {
+      sessions = sessions.filter((s) => s.status === options.status);
+    }
+    if (options.source) {
+      sessions = sessions.filter((s) => s.source === options.source);
+    }
+    if (options.startedAfter !== undefined) {
+      sessions = sessions.filter((s) => s.startedAt >= options.startedAfter!);
+    }
+    if (options.startedBefore !== undefined) {
+      sessions = sessions.filter((s) => s.startedAt <= options.startedBefore!);
+    }
+
+    sessions.sort((a, b) => b.startedAt - a.startedAt);
+
+    const offset = options.offset ?? 0;
+    const limit = options.limit ?? 100;
+    return sessions.slice(offset, offset + limit).map((s) => ({ ...s }));
+  }
+
+  async saveCaptureTrigger(trigger: StoredCaptureTrigger): Promise<string> {
+    this.captureTriggers.set(trigger.id, { ...trigger });
+    return trigger.id;
+  }
+
+  async updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean> {
+    const existing = this.captureTriggers.get(id);
+    if (!existing) {
+      return false;
+    }
+    this.captureTriggers.set(id, { ...existing, ...patch });
+    return true;
+  }
+
+  async getCaptureTrigger(id: string): Promise<StoredCaptureTrigger | null> {
+    const trigger = this.captureTriggers.get(id);
+    return trigger ? { ...trigger } : null;
+  }
+
+  async getCaptureTriggers(
+    options: CaptureTriggerQueryOptions = {},
+  ): Promise<StoredCaptureTrigger[]> {
+    let triggers = [...this.captureTriggers.values()];
+    if (options.connectionId) {
+      triggers = triggers.filter((t) => t.connectionId === options.connectionId);
+    }
+    if (options.status) {
+      triggers = triggers.filter((t) => t.status === options.status);
+    }
+    triggers.sort((a, b) => b.createdAt - a.createdAt);
+    const offset = options.offset ?? 0;
+    const limit = options.limit ?? 100;
+    return triggers.slice(offset, offset + limit).map((t) => ({ ...t }));
+  }
+
+  async saveScheduledCapture(schedule: StoredScheduledCapture): Promise<string> {
+    this.scheduledCaptures.set(schedule.id, { ...schedule });
+    return schedule.id;
+  }
+
+  async updateScheduledCapture(id: string, patch: ScheduledCapturePatch): Promise<boolean> {
+    const existing = this.scheduledCaptures.get(id);
+    if (!existing) {
+      return false;
+    }
+    this.scheduledCaptures.set(id, { ...existing, ...patch });
+    return true;
+  }
+
+  async deleteScheduledCapture(id: string): Promise<boolean> {
+    return this.scheduledCaptures.delete(id);
+  }
+
+  async getScheduledCapture(id: string): Promise<StoredScheduledCapture | null> {
+    const schedule = this.scheduledCaptures.get(id);
+    return schedule ? { ...schedule } : null;
+  }
+
+  async getScheduledCaptures(
+    options: ScheduledCaptureQueryOptions = {},
+  ): Promise<StoredScheduledCapture[]> {
+    let schedules = [...this.scheduledCaptures.values()];
+    if (options.connectionId) {
+      schedules = schedules.filter((s) => s.connectionId === options.connectionId);
+    }
+    if (options.status) {
+      schedules = schedules.filter((s) => s.status === options.status);
+    }
+    schedules.sort((a, b) => b.createdAt - a.createdAt);
+    const offset = options.offset ?? 0;
+    const limit = options.limit ?? 100;
+    return schedules.slice(offset, offset + limit).map((s) => ({ ...s }));
+  }
+
+  async pruneOldCaptureSessions(cutoffTimestamp: number): Promise<number> {
+    let pruned = 0;
+    for (const [id, session] of this.captureSessions) {
+      if (
+        session.endedAt !== undefined &&
+        session.endedAt < cutoffTimestamp &&
+        session.status !== 'running'
+      ) {
+        this.captureSessions.delete(id);
+        pruned++;
+      }
+    }
+    return pruned;
+  }
+
+  async pruneOldCaptureChunks(cutoffTimestamp: number): Promise<number> {
+    const initial = this.captureChunks.length;
+    this.captureChunks = this.captureChunks.filter((c) => c.lastTs >= cutoffTimestamp);
+    return initial - this.captureChunks.length;
+  }
+
+  async pruneOldCaptureTriggers(cutoffTimestamp: number): Promise<number> {
+    const terminal = new Set(['fired', 'skipped', 'expired', 'cancelled']);
+    let pruned = 0;
+    for (const [id, trigger] of this.captureTriggers) {
+      if (trigger.createdAt < cutoffTimestamp && terminal.has(trigger.status)) {
+        this.captureTriggers.delete(id);
+        pruned++;
+      }
+    }
+    return pruned;
+  }
+
+  async pruneOldScheduledCaptures(cutoffTimestamp: number): Promise<number> {
+    let pruned = 0;
+    for (const [id, schedule] of this.scheduledCaptures) {
+      if (schedule.createdAt < cutoffTimestamp && schedule.status === 'disabled') {
+        this.scheduledCaptures.delete(id);
+        pruned++;
+      }
+    }
+    return pruned;
   }
 }

@@ -13,10 +13,17 @@ export enum WebhookEventType {
   CONFIG_CHANGED = 'config.changed',
   REPLICATION_LAG = 'replication.lag',
   CLUSTER_FAILOVER = 'cluster.failover',
+  FAILOVER_STARTED = 'failover.started',
+  FAILOVER_COMPLETED = 'failover.completed',
   AUDIT_POLICY_VIOLATION = 'audit.policy.violation',
   COMPLIANCE_ALERT = 'compliance.alert',
   METRIC_FORECAST_LIMIT = 'metric_forecast.limit',
   INFERENCE_SLA_BREACH = 'inference.sla.breach',
+  MONITOR_SESSION_STARTED = 'monitor.session.started',
+  MONITOR_SESSION_COMPLETED = 'monitor.session.completed',
+  MONITOR_SESSION_TRUNCATED = 'monitor.session.truncated',
+  MONITOR_SESSION_SKIPPED = 'monitor.session.skipped',
+  MONITOR_TRIGGER_CREATED = 'monitor.trigger.created',
 }
 
 // Injection tokens for proprietary webhook services
@@ -29,6 +36,10 @@ export const FREE_EVENTS: WebhookEventType[] = [
   WebhookEventType.MEMORY_CRITICAL,
   WebhookEventType.CONNECTION_CRITICAL,
   WebhookEventType.CLIENT_BLOCKED,
+  WebhookEventType.MONITOR_SESSION_STARTED,
+  WebhookEventType.MONITOR_SESSION_COMPLETED,
+  WebhookEventType.MONITOR_SESSION_TRUNCATED,
+  WebhookEventType.MONITOR_SESSION_SKIPPED,
 ];
 
 export const PRO_EVENTS: WebhookEventType[] = [
@@ -40,7 +51,10 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.LATENCY_SPIKE,
   WebhookEventType.CONNECTION_SPIKE,
   WebhookEventType.METRIC_FORECAST_LIMIT,
+  WebhookEventType.FAILOVER_STARTED,
+  WebhookEventType.FAILOVER_COMPLETED,
   WebhookEventType.INFERENCE_SLA_BREACH,
+  WebhookEventType.MONITOR_TRIGGER_CREATED,
 ];
 
 export const ENTERPRISE_EVENTS: WebhookEventType[] = [
@@ -70,6 +84,10 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.MEMORY_CRITICAL]: Tier.community,
   [WebhookEventType.CONNECTION_CRITICAL]: Tier.community,
   [WebhookEventType.CLIENT_BLOCKED]: Tier.community,
+  [WebhookEventType.MONITOR_SESSION_STARTED]: Tier.community,
+  [WebhookEventType.MONITOR_SESSION_COMPLETED]: Tier.community,
+  [WebhookEventType.MONITOR_SESSION_TRUNCATED]: Tier.community,
+  [WebhookEventType.MONITOR_SESSION_SKIPPED]: Tier.community,
 
   // Pro tier events
   [WebhookEventType.ANOMALY_DETECTED]: Tier.pro,
@@ -79,7 +97,10 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.LATENCY_SPIKE]: Tier.pro,
   [WebhookEventType.CONNECTION_SPIKE]: Tier.pro,
   [WebhookEventType.METRIC_FORECAST_LIMIT]: Tier.pro,
+  [WebhookEventType.FAILOVER_STARTED]: Tier.pro,
+  [WebhookEventType.FAILOVER_COMPLETED]: Tier.pro,
   [WebhookEventType.INFERENCE_SLA_BREACH]: Tier.pro,
+  [WebhookEventType.MONITOR_TRIGGER_CREATED]: Tier.pro,
 
   // Enterprise tier events
   [WebhookEventType.AUDIT_POLICY_VIOLATION]: Tier.enterprise,
@@ -281,6 +302,22 @@ export interface IWebhookEventsProService {
     slotsAssigned: number;
     slotsFailed: number;
     knownNodes: number;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+    connectionId?: string;
+  }): Promise<void>;
+
+  dispatchFailoverStarted(data: {
+    previousRole: string;
+    newRole: string;
+    timestamp: number;
+    instance: WebhookInstanceInfo;
+    connectionId?: string;
+  }): Promise<void>;
+
+  dispatchFailoverCompleted(data: {
+    previousRole: string;
+    newRole: string;
     timestamp: number;
     instance: WebhookInstanceInfo;
     connectionId?: string;

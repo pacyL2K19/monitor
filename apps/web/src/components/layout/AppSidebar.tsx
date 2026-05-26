@@ -102,6 +102,9 @@ export function AppSidebar({ cloudUser, onFeedbackClick }: SidebarProps) {
           <NavItem to="/audit" active={location.pathname === '/audit'}>
             Audit Trail
           </NavItem>
+          <NavItem to="/monitor" active={location.pathname === '/monitor'}>
+            MONITOR
+          </NavItem>
           <NavItem to="/webhooks" active={location.pathname === '/webhooks'} demoLocked={isDemo}>
             Webhooks
           </NavItem>

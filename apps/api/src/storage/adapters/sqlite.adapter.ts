@@ -40,6 +40,16 @@ import {
   StoredLatencyHistogram,
   StoredCommandStatsSample,
   CommandStatsHistoryQueryOptions,
+  StoredCaptureSession,
+  CaptureSessionQueryOptions,
+  StoredCaptureChunk,
+  CaptureSessionPatch,
+  StoredCaptureTrigger,
+  StoredScheduledCapture,
+  ScheduledCaptureQueryOptions,
+  ScheduledCapturePatch,
+  CaptureTriggerQueryOptions,
+  CaptureTriggerPatch,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -68,6 +78,32 @@ import {
 } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
+
+/**
+ * Idempotent migrations for capture_sessions columns landed across PR 14a + 14b.
+ * Extracted so the call-site in createSchema stays readable.
+ */
+function addCaptureSessionsTargetNodeColumn(db: Database.Database): void {
+  try {
+    const cols = db.prepare(`PRAGMA table_info(capture_sessions)`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'target_node')) {
+      db.prepare(`ALTER TABLE capture_sessions ADD COLUMN target_node TEXT`).run();
+    }
+    if (!cols.some((c) => c.name === 'node_segments')) {
+      db.prepare(`ALTER TABLE capture_sessions ADD COLUMN node_segments TEXT`).run();
+    }
+  } catch {
+    // Table may not exist yet — createSchema's CREATE TABLE includes the columns from day one.
+  }
+  try {
+    const cols = db.prepare(`PRAGMA table_info(capture_chunks)`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'node_id')) {
+      db.prepare(`ALTER TABLE capture_chunks ADD COLUMN node_id TEXT`).run();
+    }
+  } catch {
+    // Same — fresh schemas have the column from day one.
+  }
+}
 
 export interface SqliteAdapterConfig {
   filepath: string;
@@ -1352,7 +1388,100 @@ export class SqliteAdapter implements StoragePort {
 
       CREATE INDEX IF NOT EXISTS idx_cache_proposal_audit_proposal
         ON cache_proposal_audit(proposal_id, event_at DESC);
+
+      -- Monitor Capture Sessions Table
+      CREATE TABLE IF NOT EXISTS capture_sessions (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running','completed','truncated','failed','skipped')),
+        source TEXT NOT NULL CHECK (source IN ('manual','trigger','schedule')),
+        trigger_id TEXT,
+        schedule_id TEXT,
+        requested_by TEXT,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        duration_ms INTEGER,
+        byte_count INTEGER NOT NULL DEFAULT 0,
+        line_count INTEGER NOT NULL DEFAULT 0,
+        byte_cap INTEGER NOT NULL,
+        line_cap INTEGER NOT NULL,
+        termination_reason TEXT,
+        target_node TEXT,
+        node_segments TEXT,
+        created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_connection_id ON capture_sessions(connection_id);
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_started_at ON capture_sessions(started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_status ON capture_sessions(status, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_source ON capture_sessions(source, started_at DESC);
+
+      -- Monitor Capture Chunks Table (one row per batched MONITOR-line chunk; populated by CaptureWriter in a later PR)
+      CREATE TABLE IF NOT EXISTS capture_chunks (
+        session_id TEXT NOT NULL REFERENCES capture_sessions(id) ON DELETE CASCADE,
+        chunk_index INTEGER NOT NULL,
+        bytes BLOB NOT NULL,
+        line_count INTEGER NOT NULL,
+        first_ts INTEGER NOT NULL,
+        last_ts INTEGER NOT NULL,
+        node_id TEXT,
+        PRIMARY KEY(session_id, chunk_index)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_capture_chunks_session ON capture_chunks(session_id, chunk_index);
+
+      -- Pro+ Capture Triggers Table (PR 15)
+      CREATE TABLE IF NOT EXISTS capture_triggers (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        metric_type TEXT NOT NULL,
+        anomaly_type TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        created_by TEXT,
+        status TEXT NOT NULL CHECK (status IN ('configured','queued','fired','skipped','expired','cancelled')),
+        fired_at INTEGER,
+        fired_session_id TEXT,
+        skip_reason TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_capture_triggers_conn_status
+        ON capture_triggers(connection_id, status, expires_at);
+      CREATE INDEX IF NOT EXISTS idx_capture_triggers_dedup
+        ON capture_triggers(connection_id, metric_type, anomaly_type, status);
+
+      -- Pro+ Scheduled Captures Table (PR 19, cron column added in PR 20)
+      CREATE TABLE IF NOT EXISTS scheduled_captures (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        interval_seconds INTEGER,
+        cron_expression TEXT,
+        duration_ms INTEGER NOT NULL CHECK (duration_ms > 0),
+        status TEXT NOT NULL CHECK (status IN ('enabled','disabled')),
+        created_at INTEGER NOT NULL,
+        created_by TEXT,
+        last_fired_at INTEGER,
+        last_fired_session_id TEXT,
+        last_skip_reason TEXT,
+        CHECK (
+          (interval_seconds IS NOT NULL AND cron_expression IS NULL)
+          OR (interval_seconds IS NULL AND cron_expression IS NOT NULL)
+        ),
+        CHECK (interval_seconds IS NULL OR interval_seconds >= 10)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_scheduled_captures_conn_status
+        ON scheduled_captures(connection_id, status);
     `);
+
+    // Idempotent migration for deployments that ran the PR 19 schema before
+    // cron support landed.
+    const scheduledCols = this.db
+      .prepare('PRAGMA table_info(scheduled_captures)')
+      .all() as { name: string }[];
+    if (!scheduledCols.some((c) => c.name === 'cron_expression')) {
+      this.db.exec('ALTER TABLE scheduled_captures ADD COLUMN cron_expression TEXT');
+    }
 
     // Idempotent migration for existing deployments without ops/CPU columns
     const addColumnIfMissing = (
@@ -1386,6 +1515,7 @@ export class SqliteAdapter implements StoragePort {
     addColumnIfMissing('command_stats_samples', 'usec_per_call', 'REAL', '0');
     addColumnIfMissing('command_stats_samples', 'rejected_calls', 'INTEGER', '0');
     addColumnIfMissing('command_stats_samples', 'failed_calls', 'INTEGER', '0');
+    addCaptureSessionsTargetNodeColumn(this.db!);
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
@@ -3562,5 +3692,478 @@ export class SqliteAdapter implements StoragePort {
       )
       .all(proposalId) as CacheProposalAuditRow[];
     return rows.map((row) => this.mapCacheProposalAuditRow(row));
+  }
+
+  async saveCaptureSession(
+    session: StoredCaptureSession,
+    connectionId: string,
+  ): Promise<string> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    this.db
+      .prepare(
+        `
+      INSERT INTO capture_sessions (
+        id, connection_id, status, source, trigger_id, schedule_id, requested_by,
+        started_at, ended_at, duration_ms, byte_count, line_count, byte_cap, line_cap,
+        termination_reason, target_node, node_segments
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      )
+      .run(
+        session.id,
+        connectionId,
+        session.status,
+        session.source,
+        session.triggerId ?? null,
+        session.scheduleId ?? null,
+        session.requestedBy ?? null,
+        session.startedAt,
+        session.endedAt ?? null,
+        session.durationMs ?? null,
+        session.byteCount,
+        session.lineCount,
+        session.byteCap,
+        session.lineCap,
+        session.terminationReason ?? null,
+        session.targetNode ?? null,
+        session.nodeSegments ? JSON.stringify(session.nodeSegments) : null,
+      );
+
+    return session.id;
+  }
+
+  async getCaptureSession(id: string): Promise<StoredCaptureSession | null> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const row = this.db
+      .prepare('SELECT * FROM capture_sessions WHERE id = ?')
+      .get(id) as Record<string, unknown> | undefined;
+
+    return row ? this.mapCaptureSessionRow(row) : null;
+  }
+
+  async getCaptureSessions(
+    options: CaptureSessionQueryOptions = {},
+  ): Promise<StoredCaptureSession[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const where: string[] = [];
+    const params: unknown[] = [];
+
+    if (options.connectionId) {
+      where.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
+    if (options.status) {
+      where.push('status = ?');
+      params.push(options.status);
+    }
+    if (options.source) {
+      where.push('source = ?');
+      params.push(options.source);
+    }
+    if (options.startedAfter !== undefined) {
+      where.push('started_at >= ?');
+      params.push(options.startedAfter);
+    }
+    if (options.startedBefore !== undefined) {
+      where.push('started_at <= ?');
+      params.push(options.startedBefore);
+    }
+
+    const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM capture_sessions ${whereClause} ORDER BY started_at DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset) as Record<string, unknown>[];
+
+    return rows.map((row) => this.mapCaptureSessionRow(row));
+  }
+
+  private mapCaptureSessionRow(row: Record<string, unknown>): StoredCaptureSession {
+    return {
+      id: row.id as string,
+      connectionId: row.connection_id as string,
+      status: row.status as StoredCaptureSession['status'],
+      source: row.source as StoredCaptureSession['source'],
+      triggerId: (row.trigger_id as string | null) ?? undefined,
+      scheduleId: (row.schedule_id as string | null) ?? undefined,
+      requestedBy: (row.requested_by as string | null) ?? undefined,
+      startedAt: row.started_at as number,
+      endedAt: (row.ended_at as number | null) ?? undefined,
+      durationMs: (row.duration_ms as number | null) ?? undefined,
+      byteCount: row.byte_count as number,
+      lineCount: row.line_count as number,
+      byteCap: row.byte_cap as number,
+      lineCap: row.line_cap as number,
+      terminationReason: (row.termination_reason as string | null) ?? undefined,
+      targetNode: (row.target_node as string | null) ?? undefined,
+      nodeSegments: parseNodeSegmentsJson(row.node_segments),
+    };
+  }
+
+  async updateCaptureSession(id: string, patch: CaptureSessionPatch): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    if (patch.status !== undefined) {
+      sets.push('status = ?');
+      params.push(patch.status);
+    }
+    if (patch.endedAt !== undefined) {
+      sets.push('ended_at = ?');
+      params.push(patch.endedAt);
+    }
+    if (patch.durationMs !== undefined) {
+      sets.push('duration_ms = ?');
+      params.push(patch.durationMs);
+    }
+    if (patch.byteCount !== undefined) {
+      sets.push('byte_count = ?');
+      params.push(patch.byteCount);
+    }
+    if (patch.lineCount !== undefined) {
+      sets.push('line_count = ?');
+      params.push(patch.lineCount);
+    }
+    if (patch.terminationReason !== undefined) {
+      sets.push('termination_reason = ?');
+      params.push(patch.terminationReason);
+    }
+    if (patch.nodeSegments !== undefined) {
+      sets.push('node_segments = ?');
+      params.push(JSON.stringify(patch.nodeSegments));
+    }
+
+    if (sets.length === 0) return false;
+
+    params.push(id);
+    const result = this.db
+      .prepare(`UPDATE capture_sessions SET ${sets.join(', ')} WHERE id = ?`)
+      .run(...params);
+    return result.changes > 0;
+  }
+
+  async saveCaptureChunk(chunk: StoredCaptureChunk): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const result = this.db
+      .prepare(
+        `INSERT INTO capture_chunks (session_id, chunk_index, bytes, line_count, first_ts, last_ts, node_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        chunk.sessionId,
+        chunk.chunkIndex,
+        chunk.bytes,
+        chunk.lineCount,
+        chunk.firstTs,
+        chunk.lastTs,
+        chunk.nodeId ?? null,
+      );
+    return result.changes;
+  }
+
+  async getCaptureChunks(sessionId: string): Promise<StoredCaptureChunk[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const rows = this.db
+      .prepare(
+        'SELECT session_id, chunk_index, bytes, line_count, first_ts, last_ts, node_id FROM capture_chunks WHERE session_id = ? ORDER BY chunk_index ASC',
+      )
+      .all(sessionId) as Record<string, unknown>[];
+
+    return rows.map((row) => ({
+      sessionId: row.session_id as string,
+      chunkIndex: row.chunk_index as number,
+      bytes: Buffer.isBuffer(row.bytes) ? (row.bytes as Buffer) : Buffer.from(row.bytes as ArrayBuffer),
+      lineCount: row.line_count as number,
+      firstTs: row.first_ts as number,
+      lastTs: row.last_ts as number,
+      nodeId: (row.node_id as string | null) ?? undefined,
+    }));
+  }
+
+  async saveCaptureTrigger(trigger: StoredCaptureTrigger): Promise<string> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db
+      .prepare(
+        `INSERT INTO capture_triggers
+          (id, connection_id, metric_type, anomaly_type, expires_at, created_at, created_by,
+           status, fired_at, fired_session_id, skip_reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        trigger.id,
+        trigger.connectionId,
+        trigger.metricType,
+        trigger.anomalyType,
+        trigger.expiresAt,
+        trigger.createdAt,
+        trigger.createdBy ?? null,
+        trigger.status,
+        trigger.firedAt ?? null,
+        trigger.firedSessionId ?? null,
+        trigger.skipReason ?? null,
+      );
+    return trigger.id;
+  }
+
+  async updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    if (patch.status !== undefined) {
+      sets.push('status = ?');
+      params.push(patch.status);
+    }
+    if (patch.firedAt !== undefined) {
+      sets.push('fired_at = ?');
+      params.push(patch.firedAt);
+    }
+    if (patch.firedSessionId !== undefined) {
+      sets.push('fired_session_id = ?');
+      params.push(patch.firedSessionId);
+    }
+    if (patch.skipReason !== undefined) {
+      sets.push('skip_reason = ?');
+      params.push(patch.skipReason);
+    }
+    if (sets.length === 0) return false;
+    params.push(id);
+    const result = this.db
+      .prepare(`UPDATE capture_triggers SET ${sets.join(', ')} WHERE id = ?`)
+      .run(...params);
+    return result.changes > 0;
+  }
+
+  async getCaptureTrigger(id: string): Promise<StoredCaptureTrigger | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare('SELECT * FROM capture_triggers WHERE id = ?')
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapCaptureTriggerRow(row) : null;
+  }
+
+  async getCaptureTriggers(
+    options: CaptureTriggerQueryOptions = {},
+  ): Promise<StoredCaptureTrigger[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (options.connectionId) {
+      where.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
+    if (options.status) {
+      where.push('status = ?');
+      params.push(options.status);
+    }
+    const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM capture_triggers ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset) as Record<string, unknown>[];
+    return rows.map((row) => this.mapCaptureTriggerRow(row));
+  }
+
+  private mapCaptureTriggerRow(row: Record<string, unknown>): StoredCaptureTrigger {
+    return {
+      id: row.id as string,
+      connectionId: row.connection_id as string,
+      metricType: row.metric_type as string,
+      anomalyType: row.anomaly_type as string,
+      expiresAt: row.expires_at as number,
+      createdAt: row.created_at as number,
+      createdBy: (row.created_by as string | null) ?? undefined,
+      status: row.status as StoredCaptureTrigger['status'],
+      firedAt: (row.fired_at as number | null) ?? undefined,
+      firedSessionId: (row.fired_session_id as string | null) ?? undefined,
+      skipReason: (row.skip_reason as string | null) ?? undefined,
+    };
+  }
+
+  async saveScheduledCapture(schedule: StoredScheduledCapture): Promise<string> {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db
+      .prepare(
+        `INSERT INTO scheduled_captures
+          (id, connection_id, interval_seconds, cron_expression, duration_ms, status,
+           created_at, created_by, last_fired_at, last_fired_session_id, last_skip_reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        schedule.id,
+        schedule.connectionId,
+        schedule.intervalSeconds ?? null,
+        schedule.cronExpression ?? null,
+        schedule.durationMs,
+        schedule.status,
+        schedule.createdAt,
+        schedule.createdBy ?? null,
+        schedule.lastFiredAt ?? null,
+        schedule.lastFiredSessionId ?? null,
+        schedule.lastSkipReason ?? null,
+      );
+    return schedule.id;
+  }
+
+  async updateScheduledCapture(id: string, patch: ScheduledCapturePatch): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    if (patch.status !== undefined) {
+      sets.push('status = ?');
+      params.push(patch.status);
+    }
+    if (patch.intervalSeconds !== undefined) {
+      sets.push('interval_seconds = ?');
+      params.push(patch.intervalSeconds);
+    }
+    if (patch.cronExpression !== undefined) {
+      sets.push('cron_expression = ?');
+      params.push(patch.cronExpression);
+    }
+    if (patch.durationMs !== undefined) {
+      sets.push('duration_ms = ?');
+      params.push(patch.durationMs);
+    }
+    if (patch.lastFiredAt !== undefined) {
+      sets.push('last_fired_at = ?');
+      params.push(patch.lastFiredAt);
+    }
+    if (patch.lastFiredSessionId !== undefined) {
+      sets.push('last_fired_session_id = ?');
+      params.push(patch.lastFiredSessionId);
+    }
+    if (patch.lastSkipReason !== undefined) {
+      sets.push('last_skip_reason = ?');
+      params.push(patch.lastSkipReason);
+    }
+    if (sets.length === 0) {
+      return false;
+    }
+    params.push(id);
+    const result = this.db
+      .prepare(`UPDATE scheduled_captures SET ${sets.join(', ')} WHERE id = ?`)
+      .run(...params);
+    return result.changes > 0;
+  }
+
+  async deleteScheduledCapture(id: string): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db
+      .prepare('DELETE FROM scheduled_captures WHERE id = ?')
+      .run(id);
+    return result.changes > 0;
+  }
+
+  async getScheduledCapture(id: string): Promise<StoredScheduledCapture | null> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare('SELECT * FROM scheduled_captures WHERE id = ?')
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapScheduledCaptureRow(row) : null;
+  }
+
+  async getScheduledCaptures(
+    options: ScheduledCaptureQueryOptions = {},
+  ): Promise<StoredScheduledCapture[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (options.connectionId) {
+      where.push('connection_id = ?');
+      params.push(options.connectionId);
+    }
+    if (options.status) {
+      where.push('status = ?');
+      params.push(options.status);
+    }
+    const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM scheduled_captures ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset) as Record<string, unknown>[];
+    return rows.map((row) => this.mapScheduledCaptureRow(row));
+  }
+
+  async pruneOldCaptureSessions(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db
+      .prepare(
+        "DELETE FROM capture_sessions WHERE ended_at IS NOT NULL AND ended_at < ? AND status != 'running'",
+      )
+      .run(cutoffTimestamp);
+    return result.changes;
+  }
+
+  async pruneOldCaptureChunks(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db
+      .prepare('DELETE FROM capture_chunks WHERE last_ts < ?')
+      .run(cutoffTimestamp);
+    return result.changes;
+  }
+
+  async pruneOldCaptureTriggers(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db
+      .prepare(
+        `DELETE FROM capture_triggers
+         WHERE created_at < ?
+           AND status IN ('fired','skipped','expired','cancelled')`,
+      )
+      .run(cutoffTimestamp);
+    return result.changes;
+  }
+
+  async pruneOldScheduledCaptures(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db
+      .prepare(
+        "DELETE FROM scheduled_captures WHERE created_at < ? AND status = 'disabled'",
+      )
+      .run(cutoffTimestamp);
+    return result.changes;
+  }
+
+  private mapScheduledCaptureRow(row: Record<string, unknown>): StoredScheduledCapture {
+    return {
+      id: row.id as string,
+      connectionId: row.connection_id as string,
+      intervalSeconds: (row.interval_seconds as number | null) ?? undefined,
+      cronExpression: (row.cron_expression as string | null) ?? undefined,
+      durationMs: row.duration_ms as number,
+      status: row.status as StoredScheduledCapture['status'],
+      createdAt: row.created_at as number,
+      createdBy: (row.created_by as string | null) ?? undefined,
+      lastFiredAt: (row.last_fired_at as number | null) ?? undefined,
+      lastFiredSessionId: (row.last_fired_session_id as string | null) ?? undefined,
+      lastSkipReason: (row.last_skip_reason as string | null) ?? undefined,
+    };
+  }
+}
+
+function parseNodeSegmentsJson(raw: unknown): StoredCaptureSession['nodeSegments'] | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw !== 'string') return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
   }
 }

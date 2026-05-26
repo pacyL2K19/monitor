@@ -37,6 +37,9 @@ export enum Feature {
   WEBHOOK_CONFIGURABLE_RETRY = 'webhookConfigurableRetry',
   INFERENCE_SLA = 'inferenceSla',
   CACHE_INTELLIGENCE = 'cacheIntelligence',
+  MONITOR_ANOMALY_TRIGGER = 'monitorAnomalyTrigger',
+  MONITOR_SCHEDULED_CAPTURES = 'monitorScheduledCaptures',
+  MONITOR_CAPTURE_DIFF = 'monitorCaptureDiff',
   // Enterprise-only features
   SSO_SAML = 'ssoSaml',
   COMPLIANCE_EXPORT = 'complianceExport',
@@ -62,6 +65,9 @@ export const TIER_FEATURES: Record<Tier, Feature[]> = {
     Feature.MIGRATION_EXECUTION,
     Feature.INFERENCE_SLA,
     Feature.CACHE_INTELLIGENCE,
+    Feature.MONITOR_ANOMALY_TRIGGER,
+    Feature.MONITOR_SCHEDULED_CAPTURES,
+    Feature.MONITOR_CAPTURE_DIFF,
   ],
   [Tier.enterprise]: Object.values(Feature),
 };

@@ -45,6 +45,22 @@ export type {
   AppendProposalAuditInput,
   AppliedResult,
 } from '@betterdb/shared';
+export type {
+  CaptureSessionStatus,
+  CaptureSessionSource,
+  StoredCaptureSession,
+  CaptureSessionQueryOptions,
+  StoredCaptureChunk,
+  CaptureSessionPatch,
+  CaptureNodeSegment,
+  CaptureTriggerStatus,
+  StoredCaptureTrigger,
+  CaptureTriggerQueryOptions,
+  CaptureTriggerPatch,
+  StoredScheduledCapture,
+  ScheduledCaptureQueryOptions,
+  ScheduledCapturePatch,
+} from '@betterdb/shared';
 import type {
   AppSettings,
   AuditQueryOptions,
@@ -74,6 +90,16 @@ import type {
   ListCacheProposalsOptions,
   UpdateProposalStatusInput,
   AppendProposalAuditInput,
+  StoredCaptureSession,
+  CaptureSessionQueryOptions,
+  StoredCaptureChunk,
+  CaptureSessionPatch,
+  StoredCaptureTrigger,
+  CaptureTriggerQueryOptions,
+  CaptureTriggerPatch,
+  StoredScheduledCapture,
+  ScheduledCaptureQueryOptions,
+  ScheduledCapturePatch,
 } from '@betterdb/shared';
 
 // Anomaly Event Types
@@ -449,6 +475,33 @@ export interface StoragePort {
   saveVectorIndexSnapshots(snapshots: VectorIndexSnapshot[], connectionId: string): Promise<number>;
   getVectorIndexSnapshots(options: VectorIndexSnapshotQueryOptions): Promise<VectorIndexSnapshot[]>;
   pruneOldVectorIndexSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  // Monitor Capture Session Methods - connectionId required for writes, optional filter for reads
+  saveCaptureSession(session: StoredCaptureSession, connectionId: string): Promise<string>;
+  updateCaptureSession(id: string, patch: CaptureSessionPatch): Promise<boolean>;
+  getCaptureSession(id: string): Promise<StoredCaptureSession | null>;
+  getCaptureSessions(options?: CaptureSessionQueryOptions): Promise<StoredCaptureSession[]>;
+  saveCaptureChunk(chunk: StoredCaptureChunk): Promise<number>;
+  getCaptureChunks(sessionId: string): Promise<StoredCaptureChunk[]>;
+
+  // Monitor Capture Trigger Methods (Pro+)
+  saveCaptureTrigger(trigger: StoredCaptureTrigger): Promise<string>;
+  updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean>;
+  getCaptureTrigger(id: string): Promise<StoredCaptureTrigger | null>;
+  getCaptureTriggers(options?: CaptureTriggerQueryOptions): Promise<StoredCaptureTrigger[]>;
+
+  // Monitor Scheduled Capture Methods (Pro+)
+  saveScheduledCapture(schedule: StoredScheduledCapture): Promise<string>;
+  updateScheduledCapture(id: string, patch: ScheduledCapturePatch): Promise<boolean>;
+  deleteScheduledCapture(id: string): Promise<boolean>;
+  getScheduledCapture(id: string): Promise<StoredScheduledCapture | null>;
+  getScheduledCaptures(options?: ScheduledCaptureQueryOptions): Promise<StoredScheduledCapture[]>;
+
+  // Monitor data-retention prune hooks (PR 22)
+  pruneOldCaptureSessions(cutoffTimestamp: number): Promise<number>;
+  pruneOldCaptureChunks(cutoffTimestamp: number): Promise<number>;
+  pruneOldCaptureTriggers(cutoffTimestamp: number): Promise<number>;
+  pruneOldScheduledCaptures(cutoffTimestamp: number): Promise<number>;
 
   // Connection Management Methods (not connection-scoped, they manage connections themselves)
   saveConnection(config: DatabaseConnectionConfig): Promise<void>;
