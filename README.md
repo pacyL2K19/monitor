@@ -11,12 +11,38 @@ betterdb-monitor/
 ├── apps/
 │   ├── api/                 # NestJS backend (Fastify)
 │   └── web/                 # React frontend (Vite)
-├── packages/
-│   ├── cli/                 # CLI package (npx betterdb)
-│   └── shared/              # Shared TypeScript types
+├── packages/                # Published packages (see below)
+├── docs/                    # Documentation site (Jekyll)
 ├── docker-compose.yml       # Local Valkey (port 6380) and Redis (port 6382) for testing
 └── package.json             # Workspace root
 ```
+
+## Packages
+
+This monorepo ships several standalone packages. See [`packages/`](packages/) for the full list.
+
+### Caching
+
+| Package | Language | Registry |
+|---|---|---|
+| [`@betterdb/semantic-cache`](packages/semantic-cache) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/semantic-cache) |
+| [`betterdb-semantic-cache`](packages/semantic-cache-py) | Python | [PyPI](https://pypi.org/project/betterdb-semantic-cache/) |
+| [`@betterdb/agent-cache`](packages/agent-cache) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/agent-cache) |
+| [`betterdb-agent-cache`](packages/agent-cache-py) | Python | [PyPI](https://pypi.org/project/betterdb-agent-cache/) |
+
+### Tools
+
+| Package | Language | Registry |
+|---|---|---|
+| [`@betterdb/monitor`](packages/cli) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/monitor) |
+| [`@betterdb/mcp`](packages/mcp) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/mcp) |
+| [`@betterdb/agent`](packages/agent) | TypeScript | [npm](https://www.npmjs.com/package/@betterdb/agent) |
+
+### Benchmarking
+
+| Package | Language | Description |
+|---|---|---|
+| [`cache-benchmark`](packages/cache-benchmark) | Python | Replay harness for benchmarking semantic caches against public datasets |
 
 ## Tech Stack
 
